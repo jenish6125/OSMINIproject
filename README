@@ -1,12 +1,6 @@
 import tkinter as tk
 from tkinter import ttk, messagebox
 
-# ============================================================
-#  Mini OS Simulator – CPU Scheduling (FCFS / SJF / Round Robin)
-#  Refined version: cleaner UI, distinct process colors, merged
-#  Gantt blocks, scrollable chart, edit/delete, quantum support,
-#  input validation, and averages that actually stay in sync.
-# ============================================================
 
 # -------- Palette --------
 BG          = "#1e222b"
