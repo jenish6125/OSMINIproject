@@ -1,6 +1,13 @@
 import tkinter as tk
 from tkinter import ttk, messagebox
 
+# ============================================================
+#  Mini OS Simulator – CPU Scheduling (FCFS / SJF / Round Robin)
+#  Refined version: cleaner UI, distinct process colors, merged
+#  Gantt blocks, scrollable chart, edit/delete, quantum support,
+#  input validation, and averages that actually stay in sync.
+# ============================================================
+
 # -------- Palette --------
 BG          = "#1e222b"
 PANEL_BG    = "#262b36"
@@ -28,8 +35,8 @@ class SchedulerOS(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Mini OS Simulator — CPU Scheduling")
-        self.geometry("1180x800")
-        self.minsize(980, 700)
+        self.geometry("1180x820")
+        self.minsize(900, 560)
         self.configure(bg=BG)
 
         self.processes = []      # list of dicts: pid, at, bt, remaining
@@ -83,13 +90,50 @@ class SchedulerOS(tk.Tk):
     #  UI construction
     # ---------------------------------------------------------
     def _build_ui(self):
-        tk.Label(self, text="Mini OS Simulator", font=("Segoe UI", 18, "bold"),
+        # Everything lives inside a scrollable canvas so that, no matter how many
+        # panels are stacked (Add/Edit, Options, Table, Comparison, Gantt), the
+        # Gantt chart always has room to render instead of being squeezed to zero
+        # height by a fixed-size window.
+        container = tk.Frame(self, bg=BG)
+        container.pack(fill="both", expand=True)
+
+        self.main_canvas = tk.Canvas(container, bg=BG, highlightthickness=0)
+        v_scroll = ttk.Scrollbar(container, orient="vertical", command=self.main_canvas.yview)
+        self.main_canvas.configure(yscrollcommand=v_scroll.set)
+        self.main_canvas.pack(side="left", fill="both", expand=True)
+        v_scroll.pack(side="right", fill="y")
+
+        root = tk.Frame(self.main_canvas, bg=BG)
+        canvas_window = self.main_canvas.create_window((0, 0), window=root, anchor="nw")
+
+        def _sync_scrollregion(event=None):
+            self.main_canvas.configure(scrollregion=self.main_canvas.bbox("all"))
+        root.bind("<Configure>", _sync_scrollregion)
+
+        def _sync_width(event):
+            self.main_canvas.itemconfig(canvas_window, width=event.width)
+        self.main_canvas.bind("<Configure>", _sync_width)
+
+        def _on_mousewheel(event):
+            if getattr(event, "num", None) == 4:
+                delta = -1
+            elif getattr(event, "num", None) == 5:
+                delta = 1
+            else:
+                delta = -1 if event.delta > 0 else 1
+            self.main_canvas.yview_scroll(delta, "units")
+
+        self.main_canvas.bind_all("<MouseWheel>", _on_mousewheel)   # Windows / macOS
+        self.main_canvas.bind_all("<Button-4>", _on_mousewheel)     # Linux scroll up
+        self.main_canvas.bind_all("<Button-5>", _on_mousewheel)     # Linux scroll down
+
+        tk.Label(root, text="Mini OS Simulator", font=("Segoe UI", 18, "bold"),
                   bg=BG, fg=TEXT_LIGHT).pack(anchor="w", padx=16, pady=(14, 0))
-        tk.Label(self, text="Visualize how a CPU scheduler orders and executes processes",
+        tk.Label(root, text="Visualize how a CPU scheduler orders and executes processes",
                   font=LABEL_FONT, bg=BG, fg=TEXT_MUTED).pack(anchor="w", padx=16, pady=(0, 10))
 
         # -------- Input Panel --------
-        input_frame = ttk.LabelFrame(self, text="  Add / Edit Process  ", style="Panel.TLabelframe")
+        input_frame = ttk.LabelFrame(root, text="  Add / Edit Process  ", style="Panel.TLabelframe")
         input_frame.pack(fill="x", padx=16, pady=8)
         inner = tk.Frame(input_frame, bg=PANEL_BG)
         inner.pack(fill="x", padx=14, pady=12)
@@ -97,6 +141,7 @@ class SchedulerOS(tk.Tk):
         self._field(inner, "Process ID", 0)
         self._field(inner, "Arrival Time", 1)
         self._field(inner, "Burst Time", 2)
+        self._field(inner, "Priority", 3)
 
         self.pid_entry = tk.Entry(inner, width=12, font=ENTRY_FONT, bg=ENTRY_BG,
                                    fg=TEXT_LIGHT, insertbackground=TEXT_LIGHT, relief="flat")
@@ -104,28 +149,34 @@ class SchedulerOS(tk.Tk):
                                   fg=TEXT_LIGHT, insertbackground=TEXT_LIGHT, relief="flat")
         self.bt_entry = tk.Entry(inner, width=12, font=ENTRY_FONT, bg=ENTRY_BG,
                                   fg=TEXT_LIGHT, insertbackground=TEXT_LIGHT, relief="flat")
+        self.priority_entry = tk.Entry(inner, width=12, font=ENTRY_FONT, bg=ENTRY_BG,
+                                        fg=TEXT_LIGHT, insertbackground=TEXT_LIGHT, relief="flat")
 
         self.pid_entry.grid(row=1, column=0, padx=(0, 16), ipady=4)
         self.at_entry.grid(row=1, column=1, padx=(0, 16), ipady=4)
         self.bt_entry.grid(row=1, column=2, padx=(0, 16), ipady=4)
+        self.priority_entry.grid(row=1, column=3, padx=(0, 16), ipady=4)
 
         self.add_btn = self._btn(inner, "Add Process", self.add_process)
-        self.add_btn.grid(row=1, column=3, padx=(0, 8))
+        self.add_btn.grid(row=1, column=4, padx=(0, 8))
 
         self.cancel_edit_btn = self._btn(inner, "Cancel Edit", self.cancel_edit, bg="#4a4f5c")
         # hidden until an edit begins
 
         self._btn(inner, "Delete Selected", self.delete_process, bg=DANGER).grid(
-            row=1, column=5, padx=(8, 0))
-        self._btn(inner, "Reset All", self.reset_all, bg="#4a4f5c").grid(
             row=1, column=6, padx=(8, 0))
+        self._btn(inner, "Reset All", self.reset_all, bg="#4a4f5c").grid(
+            row=1, column=7, padx=(8, 0))
 
         self.hint_label = tk.Label(input_frame, text="", font=("Segoe UI", 9),
                                     bg=PANEL_BG, fg=DANGER)
-        self.hint_label.pack(anchor="w", padx=14, pady=(0, 8))
+        self.hint_label.pack(anchor="w", padx=14, pady=(0, 2))
+
+        tk.Label(input_frame, text="Priority: lower number = higher priority (e.g. 1 runs before 5).",
+                 font=("Segoe UI", 9), bg=PANEL_BG, fg=TEXT_MUTED).pack(anchor="w", padx=14, pady=(0, 8))
 
         # -------- Options Panel --------
-        option_frame = ttk.LabelFrame(self, text="  Scheduling Options  ", style="Panel.TLabelframe")
+        option_frame = ttk.LabelFrame(root, text="  Scheduling Options  ", style="Panel.TLabelframe")
         option_frame.pack(fill="x", padx=16, pady=8)
         opt_inner = tk.Frame(option_frame, bg=PANEL_BG)
         opt_inner.pack(fill="x", padx=14, pady=12)
@@ -139,18 +190,20 @@ class SchedulerOS(tk.Tk):
                          command=self._on_algo_change).grid(row=0, column=1, padx=10)
         ttk.Radiobutton(opt_inner, text="SJF", variable=self.algorithm, value="SJF",
                          command=self._on_algo_change).grid(row=0, column=2, padx=10)
-        ttk.Radiobutton(opt_inner, text="Round Robin", variable=self.algorithm, value="RR",
+        ttk.Radiobutton(opt_inner, text="Priority", variable=self.algorithm, value="PR",
                          command=self._on_algo_change).grid(row=0, column=3, padx=10)
+        ttk.Radiobutton(opt_inner, text="Round Robin", variable=self.algorithm, value="RR",
+                         command=self._on_algo_change).grid(row=0, column=4, padx=10)
 
         self.mode_label = tk.Label(opt_inner, text="Mode:", font=LABEL_FONT, bg=PANEL_BG,
                                     fg=TEXT_MUTED)
-        self.mode_label.grid(row=0, column=4, padx=(30, 0), sticky="w")
+        self.mode_label.grid(row=0, column=5, padx=(30, 0), sticky="w")
         self.np_radio = ttk.Radiobutton(opt_inner, text="Non-Preemptive", variable=self.mode,
                                          value="Non-Preemptive")
         self.p_radio = ttk.Radiobutton(opt_inner, text="Preemptive", variable=self.mode,
                                         value="Preemptive")
-        self.np_radio.grid(row=0, column=5, padx=10)
-        self.p_radio.grid(row=0, column=6, padx=10)
+        self.np_radio.grid(row=0, column=6, padx=10)
+        self.p_radio.grid(row=0, column=7, padx=10)
 
         self.quantum_label = tk.Label(opt_inner, text="Quantum:", font=LABEL_FONT,
                                        bg=PANEL_BG, fg=TEXT_MUTED)
@@ -159,19 +212,21 @@ class SchedulerOS(tk.Tk):
         self.quantum_entry.insert(0, "2")
 
         self._btn(opt_inner, "▶  Run Scheduling", self.run_scheduling).grid(
-            row=0, column=9, padx=(30, 0))
+            row=0, column=10, padx=(30, 0))
+        self._btn(opt_inner, "⇄  Compare Algorithms", self.compare_algorithms, bg="#4a4f5c").grid(
+            row=0, column=11, padx=(10, 0))
 
         self._on_algo_change()  # set initial visibility
 
         # -------- Process Table --------
-        table_frame = ttk.LabelFrame(self, text="  Process Table  ", style="Panel.TLabelframe")
+        table_frame = ttk.LabelFrame(root, text="  Process Table  ", style="Panel.TLabelframe")
         table_frame.pack(fill="x", padx=16, pady=8)
 
         self.table = ttk.Treeview(
-            table_frame, columns=("PID", "AT", "BT", "WT", "TAT"),
+            table_frame, columns=("PID", "AT", "BT", "PR", "WT", "TAT"),
             show="headings", height=7
         )
-        headings = {"PID": "Process", "AT": "Arrival", "BT": "Burst",
+        headings = {"PID": "Process", "AT": "Arrival", "BT": "Burst", "PR": "Priority",
                     "WT": "Waiting", "TAT": "Turnaround"}
         for col, text in headings.items():
             self.table.heading(col, text=text)
@@ -182,23 +237,48 @@ class SchedulerOS(tk.Tk):
         self.table.tag_configure("even", background=ENTRY_BG)
 
         # -------- Averages --------
-        self.avg_label = tk.Label(self, text="Average Waiting Time: —      Average Turnaround Time: —",
+        self.avg_label = tk.Label(root, text="Average Waiting Time: —      Average Turnaround Time: —",
                                    font=("Segoe UI", 12, "bold"), bg=BG, fg=TEXT_LIGHT)
         self.avg_label.pack(pady=(10, 6))
 
+        # -------- Algorithm Comparison --------
+        compare_frame = ttk.LabelFrame(root, text="  Algorithm Comparison  ", style="Panel.TLabelframe")
+        compare_frame.pack(fill="x", padx=16, pady=8)
+
+        self.compare_table = ttk.Treeview(
+            compare_frame, columns=("ALG", "WT", "TAT", "SWITCH", "MAKESPAN"),
+            show="headings", height=4
+        )
+        compare_headings = {"ALG": "Algorithm", "WT": "Avg Waiting", "TAT": "Avg Turnaround",
+                             "SWITCH": "Context Switches", "MAKESPAN": "Total Time"}
+        for col, text in compare_headings.items():
+            self.compare_table.heading(col, text=text)
+            self.compare_table.column(col, anchor="center",
+                                       width=220 if col == "ALG" else 140)
+        self.compare_table.pack(fill="x", padx=12, pady=(10, 6))
+        self.compare_table.tag_configure("best", background="#2d5a3d", foreground="white")
+
+        self.comparison_summary = tk.Label(
+            compare_frame, text="Add processes and click “Compare Algorithms” to see which "
+                                 "scheduler performs best for this specific workload.",
+            font=("Segoe UI", 9), bg=PANEL_BG, fg=TEXT_MUTED, justify="left",
+            anchor="w", wraplength=1080
+        )
+        self.comparison_summary.pack(fill="x", padx=12, pady=(0, 12))
+
         # -------- Gantt Chart --------
-        gantt_frame = ttk.LabelFrame(self, text="  Gantt Chart  ", style="Panel.TLabelframe")
-        gantt_frame.pack(fill="both", expand=True, padx=16, pady=(0, 16))
+        gantt_frame = ttk.LabelFrame(root, text="  Gantt Chart  ", style="Panel.TLabelframe")
+        gantt_frame.pack(fill="x", padx=16, pady=(0, 24))
 
         canvas_container = tk.Frame(gantt_frame, bg=PANEL_BG)
         canvas_container.pack(fill="both", expand=True, padx=12, pady=12)
 
-        self.canvas = tk.Canvas(canvas_container, height=140, bg="#12141a",
+        self.canvas = tk.Canvas(canvas_container, height=150, bg="#12141a",
                                  highlightthickness=0)
         h_scroll = ttk.Scrollbar(canvas_container, orient="horizontal",
                                   command=self.canvas.xview, style="Horizontal.TScrollbar")
         self.canvas.configure(xscrollcommand=h_scroll.set)
-        self.canvas.pack(fill="both", expand=True)
+        self.canvas.pack(fill="x")
         h_scroll.pack(fill="x")
 
     def _field(self, parent, text, col):
@@ -207,7 +287,7 @@ class SchedulerOS(tk.Tk):
 
     def _on_algo_change(self):
         algo = self.algorithm.get()
-        if algo == "SJF":
+        if algo in ("SJF", "PR"):
             self.mode_label.grid()
             self.np_radio.grid()
             self.p_radio.grid()
@@ -217,8 +297,8 @@ class SchedulerOS(tk.Tk):
             self.mode_label.grid_remove()
             self.np_radio.grid_remove()
             self.p_radio.grid_remove()
-            self.quantum_label.grid(row=0, column=7, padx=(20, 6))
-            self.quantum_entry.grid(row=0, column=8)
+            self.quantum_label.grid(row=0, column=8, padx=(20, 6))
+            self.quantum_entry.grid(row=0, column=9)
         else:  # FCFS
             self.mode_label.grid_remove()
             self.np_radio.grid_remove()
@@ -238,13 +318,15 @@ class SchedulerOS(tk.Tk):
         self.table.delete(*self.table.get_children())
         for i, p in enumerate(self.processes):
             tag = "odd" if i % 2 else "even"
-            self.table.insert("", "end", values=(p["pid"], p["at"], p["bt"], "-", "-"), tags=(tag,))
+            self.table.insert("", "end", values=(p["pid"], p["at"], p["bt"], p["priority"], "-", "-"),
+                               tags=(tag,))
 
     def add_process(self):
         self.hint_label.config(text="")
         pid = self.pid_entry.get().strip()
         at_raw = self.at_entry.get().strip()
         bt_raw = self.bt_entry.get().strip()
+        pr_raw = self.priority_entry.get().strip()
 
         if not pid:
             self.hint_label.config(text="Process ID cannot be empty.")
@@ -252,8 +334,13 @@ class SchedulerOS(tk.Tk):
         if not at_raw.isdigit() or not bt_raw.isdigit():
             self.hint_label.config(text="Arrival and Burst time must be non-negative whole numbers.")
             return
+        if not pr_raw:
+            pr_raw = "0"  # default priority when left blank
+        if not pr_raw.isdigit():
+            self.hint_label.config(text="Priority must be a non-negative whole number (lower = higher priority).")
+            return
 
-        at, bt = int(at_raw), int(bt_raw)
+        at, bt, priority = int(at_raw), int(bt_raw), int(pr_raw)
         if bt <= 0:
             self.hint_label.config(text="Burst time must be greater than 0.")
             return
@@ -262,7 +349,7 @@ class SchedulerOS(tk.Tk):
             # Update existing process instead of duplicating
             for p in self.processes:
                 if p["pid"] == self.editing_pid:
-                    p["pid"], p["at"], p["bt"], p["remaining"] = pid, at, bt, bt
+                    p["pid"], p["at"], p["bt"], p["priority"], p["remaining"] = pid, at, bt, priority, bt
                     break
             if self.editing_pid != pid and self.editing_pid in self.pid_colors:
                 self.pid_colors[pid] = self.pid_colors.pop(self.editing_pid)
@@ -271,13 +358,14 @@ class SchedulerOS(tk.Tk):
             if any(p["pid"] == pid for p in self.processes):
                 self.hint_label.config(text=f"Process '{pid}' already exists — use a unique ID or double-click to edit.")
                 return
-            self.processes.append({"pid": pid, "at": at, "bt": bt, "remaining": bt})
+            self.processes.append({"pid": pid, "at": at, "bt": bt, "priority": priority, "remaining": bt})
             self._color_for(pid)
 
         self._refresh_table()
         self.pid_entry.delete(0, tk.END)
         self.at_entry.delete(0, tk.END)
         self.bt_entry.delete(0, tk.END)
+        self.priority_entry.delete(0, tk.END)
         self.pid_entry.focus_set()
 
     def load_for_edit(self, event):
@@ -285,18 +373,20 @@ class SchedulerOS(tk.Tk):
         if not selected:
             return
         values = self.table.item(selected[0])["values"]
-        pid, at, bt = values[0], values[1], values[2]
+        pid, at, bt, priority = values[0], values[1], values[2], values[3]
 
         self.pid_entry.delete(0, tk.END)
         self.at_entry.delete(0, tk.END)
         self.bt_entry.delete(0, tk.END)
+        self.priority_entry.delete(0, tk.END)
         self.pid_entry.insert(0, pid)
         self.at_entry.insert(0, at)
         self.bt_entry.insert(0, bt)
+        self.priority_entry.insert(0, priority)
 
         self.editing_pid = str(pid)
         self.add_btn.config(text="Update Process")
-        self.cancel_edit_btn.grid(row=1, column=4, padx=(0, 8))
+        self.cancel_edit_btn.grid(row=1, column=5, padx=(0, 8))
 
     def cancel_edit(self):
         self.editing_pid = None
@@ -305,6 +395,7 @@ class SchedulerOS(tk.Tk):
         self.pid_entry.delete(0, tk.END)
         self.at_entry.delete(0, tk.END)
         self.bt_entry.delete(0, tk.END)
+        self.priority_entry.delete(0, tk.END)
 
     def delete_process(self):
         selected = self.table.selection()
@@ -331,6 +422,11 @@ class SchedulerOS(tk.Tk):
         self._refresh_table()
         self.clear_gantt()
         self.avg_label.config(text="Average Waiting Time: —      Average Turnaround Time: —")
+        self.compare_table.delete(*self.compare_table.get_children())
+        self.comparison_summary.config(
+            text="Add processes and click “Compare Algorithms” to see which "
+                 "scheduler performs best for this specific workload."
+        )
 
     # ---------------------------------------------------------
     #  Scheduling
@@ -348,15 +444,17 @@ class SchedulerOS(tk.Tk):
         algo = self.algorithm.get()
         try:
             if algo == "FCFS":
-                self.fcfs()
+                self.schedule = self.fcfs()
             elif algo == "SJF":
-                self.sjf()
+                self.schedule = self.sjf(preemptive=self.mode.get() == "Preemptive")
+            elif algo == "PR":
+                self.schedule = self.priority_scheduling(preemptive=self.mode.get() == "Preemptive")
             else:
                 quantum_raw = self.quantum_entry.get().strip()
                 if not quantum_raw.isdigit() or int(quantum_raw) <= 0:
                     messagebox.showerror("Invalid quantum", "Time quantum must be a positive whole number.")
                     return
-                self.round_robin(int(quantum_raw))
+                self.schedule = self.round_robin(int(quantum_raw))
         except Exception as exc:
             messagebox.showerror("Scheduling error", f"Something went wrong: {exc}")
             return
@@ -364,28 +462,34 @@ class SchedulerOS(tk.Tk):
         self.calculate_times()
         self.draw_gantt()
 
-    def fcfs(self):
+    # -- Each scheduler works on `processes` if given (used for side-by-side
+    #    comparison), otherwise falls back to the live self.processes list. --
+    def fcfs(self, processes=None):
+        procs = processes if processes is not None else self.processes
+        schedule = []
         time = 0
-        for p in sorted(self.processes, key=lambda x: (x["at"], x["pid"])):
+        for p in sorted(procs, key=lambda x: (x["at"], x["pid"])):
             if time < p["at"]:
-                self.schedule.append(("IDLE", time, p["at"]))
+                schedule.append(("IDLE", time, p["at"]))
                 time = p["at"]
             start = time
             end = start + p["bt"]
             time = end
-            self.schedule.append((p["pid"], start, end))
+            schedule.append((p["pid"], start, end))
+        return schedule
 
-    def sjf(self):
+    def sjf(self, processes=None, preemptive=False):
+        procs = processes if processes is not None else self.processes
+        schedule = []
         time = 0
         completed = 0
-        n = len(self.processes)
-        preemptive = self.mode.get() == "Preemptive"
+        n = len(procs)
 
         while completed < n:
-            ready = [p for p in self.processes if p["at"] <= time and p["remaining"] > 0]
+            ready = [p for p in procs if p["at"] <= time and p["remaining"] > 0]
             if not ready:
-                next_arrival = min(p["at"] for p in self.processes if p["remaining"] > 0)
-                self.schedule.append(("IDLE", time, next_arrival))
+                next_arrival = min(p["at"] for p in procs if p["remaining"] > 0)
+                schedule.append(("IDLE", time, next_arrival))
                 time = next_arrival
                 continue
 
@@ -395,19 +499,54 @@ class SchedulerOS(tk.Tk):
                 time += p["remaining"]
                 p["remaining"] = 0
                 completed += 1
-                self.schedule.append((p["pid"], start, time))
+                schedule.append((p["pid"], start, time))
             else:
                 start = time
                 time += 1
                 p["remaining"] -= 1
-                self.schedule.append((p["pid"], start, time))
+                schedule.append((p["pid"], start, time))
                 if p["remaining"] == 0:
                     completed += 1
+        return schedule
 
-    def round_robin(self, quantum):
+    def priority_scheduling(self, processes=None, preemptive=False):
+        """Lower priority number = runs first. Ties broken by earlier arrival, then PID."""
+        procs = processes if processes is not None else self.processes
+        schedule = []
         time = 0
-        remaining = {p["pid"]: p["bt"] for p in self.processes}
-        arrival_order = sorted(self.processes, key=lambda x: (x["at"], x["pid"]))
+        completed = 0
+        n = len(procs)
+
+        while completed < n:
+            ready = [p for p in procs if p["at"] <= time and p["remaining"] > 0]
+            if not ready:
+                next_arrival = min(p["at"] for p in procs if p["remaining"] > 0)
+                schedule.append(("IDLE", time, next_arrival))
+                time = next_arrival
+                continue
+
+            p = min(ready, key=lambda x: (x["priority"], x["at"], x["pid"]))
+            if not preemptive:
+                start = time
+                time += p["remaining"]
+                p["remaining"] = 0
+                completed += 1
+                schedule.append((p["pid"], start, time))
+            else:
+                start = time
+                time += 1
+                p["remaining"] -= 1
+                schedule.append((p["pid"], start, time))
+                if p["remaining"] == 0:
+                    completed += 1
+        return schedule
+
+    def round_robin(self, quantum, processes=None):
+        procs = processes if processes is not None else self.processes
+        schedule = []
+        time = 0
+        remaining = {p["pid"]: p["bt"] for p in procs}
+        arrival_order = sorted(procs, key=lambda x: (x["at"], x["pid"]))
         n = len(arrival_order)
         idx = 0
         queue = []
@@ -420,7 +559,7 @@ class SchedulerOS(tk.Tk):
 
             if not queue:
                 next_arrival = arrival_order[idx]["at"]
-                self.schedule.append(("IDLE", time, next_arrival))
+                schedule.append(("IDLE", time, next_arrival))
                 time = next_arrival
                 continue
 
@@ -429,7 +568,7 @@ class SchedulerOS(tk.Tk):
             start = time
             time += run_time
             remaining[p["pid"]] -= run_time
-            self.schedule.append((p["pid"], start, time))
+            schedule.append((p["pid"], start, time))
 
             while idx < n and arrival_order[idx]["at"] <= time:
                 queue.append(arrival_order[idx])
@@ -439,6 +578,115 @@ class SchedulerOS(tk.Tk):
                 queue.append(p)
             else:
                 completed += 1
+        return schedule
+
+    # ---------------------------------------------------------
+    #  Algorithm comparison
+    # ---------------------------------------------------------
+    def _deep_copy_processes(self):
+        return [{"pid": p["pid"], "at": p["at"], "bt": p["bt"], "priority": p["priority"],
+                 "remaining": p["bt"]} for p in self.processes]
+
+    def _metrics_for(self, procs, schedule):
+        total_wt, total_tat = 0, 0
+        for p in procs:
+            completion = max(end for pid, _, end in schedule if pid == p["pid"])
+            tat = completion - p["at"]
+            wt = tat - p["bt"]
+            total_wt += wt
+            total_tat += tat
+
+        merged = self._merge_schedule(schedule)
+        non_idle_blocks = [b for b in merged if b[0] != "IDLE"]
+        switches = max(len(non_idle_blocks) - 1, 0)
+        makespan = max(end for _, _, end in schedule)
+
+        n = len(procs)
+        return {
+            "avg_wt": total_wt / n,
+            "avg_tat": total_tat / n,
+            "switches": switches,
+            "makespan": makespan,
+        }
+
+    def compare_algorithms(self):
+        if not self.processes:
+            messagebox.showwarning("No processes", "Add at least one process first.")
+            return
+
+        quantum_raw = self.quantum_entry.get().strip()
+        if quantum_raw.isdigit() and int(quantum_raw) > 0:
+            quantum = int(quantum_raw)
+        else:
+            quantum = 2
+            self.quantum_entry.delete(0, tk.END)
+            self.quantum_entry.insert(0, str(quantum))
+
+        configs = [
+            ("FCFS", lambda procs: self.fcfs(procs)),
+            ("SJF (Non-Preemptive)", lambda procs: self.sjf(procs, preemptive=False)),
+            ("SJF (Preemptive / SRTF)", lambda procs: self.sjf(procs, preemptive=True)),
+            ("Priority (Non-Preemptive)", lambda procs: self.priority_scheduling(procs, preemptive=False)),
+            ("Priority (Preemptive)", lambda procs: self.priority_scheduling(procs, preemptive=True)),
+            (f"Round Robin (q={quantum})", lambda procs: self.round_robin(quantum, procs)),
+        ]
+
+        results = []
+        try:
+            for name, func in configs:
+                procs_copy = self._deep_copy_processes()
+                sched = func(procs_copy)
+                metrics = self._metrics_for(procs_copy, sched)
+                metrics["name"] = name
+                results.append(metrics)
+        except Exception as exc:
+            messagebox.showerror("Comparison error", f"Couldn't complete the comparison: {exc}")
+            return
+
+        self._render_comparison(results)
+
+    def _render_comparison(self, results):
+        self.compare_table.delete(*self.compare_table.get_children())
+        best = min(results, key=lambda r: r["avg_wt"])
+
+        for r in results:
+            tag = "best" if r is best else ""
+            self.compare_table.insert("", "end", values=(
+                r["name"], f'{r["avg_wt"]:.2f}', f'{r["avg_tat"]:.2f}',
+                r["switches"], r["makespan"]
+            ), tags=(tag,) if tag else ())
+
+        self.comparison_summary.config(text=self._build_recommendation(best))
+
+    def _build_recommendation(self, best):
+        return (
+            f"Best fit for this workload: {best['name']} — lowest average waiting "
+            f"time ({best['avg_wt']:.2f}) and turnaround time ({best['avg_tat']:.2f}) "
+            f"among the options tested.\n\n"
+            "General guidance for when each algorithm tends to make sense:\n"
+            "• FCFS — simplest and starvation-free, but a long process ahead of short "
+            "ones causes a convoy effect. Good when burst times are similar or arrival "
+            "order should be respected (e.g. print queues, batch jobs).\n"
+            "• SJF (Non-Preemptive) — minimizes average waiting time when burst times "
+            "vary and are known ahead of time; long jobs can starve if short jobs keep "
+            "arriving. Suits batch systems where jobs can be estimated in advance.\n"
+            "• SJF (Preemptive / SRTF) — reacts immediately to shorter jobs arriving, "
+            "usually the best average waiting time, but causes the most context "
+            "switches and can starve long jobs further. Good when responsiveness to "
+            "short tasks matters more than switching overhead.\n"
+            "• Priority (Non-Preemptive) — runs whatever has the most important "
+            "priority number once the CPU is free; simple and predictable, but a "
+            "low-priority process can wait a long time behind higher-priority arrivals. "
+            "Suits systems where task importance is fixed and known upfront.\n"
+            "• Priority (Preemptive) — instantly switches to a higher-priority arrival, "
+            "so urgent work always gets the CPU fastest, at the cost of more context "
+            "switches and starvation risk for low-priority jobs (mitigate with aging, "
+            "i.e. raising priority the longer a job waits).\n"
+            "• Round Robin — fairest and most responsive, ideal for interactive or "
+            "time-sharing systems, but typically trades some average waiting time and "
+            "extra context switches for that fairness. Tune the quantum: too small "
+            "increases overhead, too large behaves like FCFS."
+        )
 
     # ---------------------------------------------------------
     #  Results
@@ -458,16 +706,17 @@ class SchedulerOS(tk.Tk):
             tag = "odd" if i % 2 else "even"
             item_id = self.table.get_children()[i] if i < len(self.table.get_children()) else None
             if item_id:
-                self.table.item(item_id, values=(p["pid"], p["at"], p["bt"], wt, tat), tags=(tag,))
+                self.table.item(item_id, values=(p["pid"], p["at"], p["bt"], p["priority"], wt, tat), tags=(tag,))
 
         self.avg_label.config(
             text=f"Average Waiting Time: {total_wt/n:.2f}      Average Turnaround Time: {total_tat/n:.2f}"
         )
 
-    def _merge_schedule(self):
+    def _merge_schedule(self, schedule=None):
         """Combine consecutive entries of the same pid into one block for a cleaner chart."""
+        schedule = schedule if schedule is not None else self.schedule
         merged = []
-        for pid, start, end in self.schedule:
+        for pid, start, end in schedule:
             if merged and merged[-1][0] == pid and merged[-1][2] == start:
                 merged[-1] = (pid, merged[-1][1], end)
             else:
@@ -499,7 +748,7 @@ class SchedulerOS(tk.Tk):
 
         self.canvas.create_text(x, bottom + 14, text=str(blocks[-1][2]), fill=TEXT_MUTED,
                                  font=("Segoe UI", 8))
-        self.canvas.configure(scrollregion=(0, 0, x + 20, 140))
+        self.canvas.configure(scrollregion=(0, 0, x + 20, 150))
 
     def clear_gantt(self):
         self.canvas.delete("all")
