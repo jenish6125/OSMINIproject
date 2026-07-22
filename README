@@ -1,0 +1,511 @@
+import tkinter as tk
+from tkinter import ttk, messagebox
+
+# -------- Palette --------
+BG          = "#1e222b"
+PANEL_BG    = "#262b36"
+ACCENT      = "#5865f2"
+ACCENT_HOV  = "#4752c4"
+TEXT_LIGHT  = "#e6e8ef"
+TEXT_MUTED  = "#9aa0ac"
+ENTRY_BG    = "#333846"
+IDLE_COLOR  = "#3a3f4b"
+DANGER      = "#e35d6a"
+
+# Distinct, readable colors cycled per process id
+PROCESS_COLORS = [
+    "#5865f2", "#57c785", "#f2b84b", "#e35d6a", "#4bb8f2",
+    "#c77df2", "#f28e4b", "#4bf2c7", "#f24b8e", "#a3f24b",
+]
+
+HEADER_FONT = ("Segoe UI", 13, "bold")
+LABEL_FONT  = ("Segoe UI", 10)
+ENTRY_FONT  = ("Segoe UI", 10)
+MONO_FONT   = ("Consolas", 10)
+
+
+class SchedulerOS(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("Mini OS Simulator — CPU Scheduling")
+        self.geometry("1180x800")
+        self.minsize(980, 700)
+        self.configure(bg=BG)
+
+        self.processes = []      # list of dicts: pid, at, bt, remaining
+        self.schedule = []       # list of (pid, start, end)
+        self.editing_pid = None  # pid currently being edited, if any
+        self.pid_colors = {}     # pid -> color, assigned in insertion order
+
+        self._configure_style()
+        self._build_ui()
+
+    # ---------------------------------------------------------
+    #  Styling
+    # ---------------------------------------------------------
+    def _configure_style(self):
+        style = ttk.Style(self)
+        try:
+            style.theme_use("clam")
+        except tk.TclError:
+            pass
+
+        style.configure("TFrame", background=BG)
+        style.configure("Panel.TLabelframe", background=PANEL_BG, borderwidth=0,
+                         relief="flat")
+        style.configure("Panel.TLabelframe.Label", background=PANEL_BG,
+                         foreground=TEXT_LIGHT, font=HEADER_FONT)
+
+        style.configure("TRadiobutton", background=PANEL_BG, foreground=TEXT_LIGHT,
+                         font=LABEL_FONT)
+        style.map("TRadiobutton", background=[("active", PANEL_BG)])
+
+        style.configure("Treeview", background=ENTRY_BG, fieldbackground=ENTRY_BG,
+                         foreground=TEXT_LIGHT, rowheight=28, font=LABEL_FONT,
+                         borderwidth=0)
+        style.configure("Treeview.Heading", background=PANEL_BG, foreground=TEXT_LIGHT,
+                         font=("Segoe UI", 10, "bold"), borderwidth=0)
+        style.map("Treeview", background=[("selected", ACCENT)])
+
+        style.configure("Horizontal.TScrollbar", background=PANEL_BG,
+                         troughcolor=BG, borderwidth=0)
+
+    def _btn(self, parent, text, command, bg=ACCENT, fg="white", width=None):
+        b = tk.Button(parent, text=text, command=command, bg=bg, fg=fg,
+                       activebackground=ACCENT_HOV, activeforeground="white",
+                       font=("Segoe UI", 10, "bold"), relief="flat",
+                       cursor="hand2", padx=14, pady=6, bd=0)
+        if width:
+            b.config(width=width)
+        return b
+
+    # ---------------------------------------------------------
+    #  UI construction
+    # ---------------------------------------------------------
+    def _build_ui(self):
+        tk.Label(self, text="Mini OS Simulator", font=("Segoe UI", 18, "bold"),
+                  bg=BG, fg=TEXT_LIGHT).pack(anchor="w", padx=16, pady=(14, 0))
+        tk.Label(self, text="Visualize how a CPU scheduler orders and executes processes",
+                  font=LABEL_FONT, bg=BG, fg=TEXT_MUTED).pack(anchor="w", padx=16, pady=(0, 10))
+
+        # -------- Input Panel --------
+        input_frame = ttk.LabelFrame(self, text="  Add / Edit Process  ", style="Panel.TLabelframe")
+        input_frame.pack(fill="x", padx=16, pady=8)
+        inner = tk.Frame(input_frame, bg=PANEL_BG)
+        inner.pack(fill="x", padx=14, pady=12)
+
+        self._field(inner, "Process ID", 0)
+        self._field(inner, "Arrival Time", 1)
+        self._field(inner, "Burst Time", 2)
+
+        self.pid_entry = tk.Entry(inner, width=12, font=ENTRY_FONT, bg=ENTRY_BG,
+                                   fg=TEXT_LIGHT, insertbackground=TEXT_LIGHT, relief="flat")
+        self.at_entry = tk.Entry(inner, width=12, font=ENTRY_FONT, bg=ENTRY_BG,
+                                  fg=TEXT_LIGHT, insertbackground=TEXT_LIGHT, relief="flat")
+        self.bt_entry = tk.Entry(inner, width=12, font=ENTRY_FONT, bg=ENTRY_BG,
+                                  fg=TEXT_LIGHT, insertbackground=TEXT_LIGHT, relief="flat")
+
+        self.pid_entry.grid(row=1, column=0, padx=(0, 16), ipady=4)
+        self.at_entry.grid(row=1, column=1, padx=(0, 16), ipady=4)
+        self.bt_entry.grid(row=1, column=2, padx=(0, 16), ipady=4)
+
+        self.add_btn = self._btn(inner, "Add Process", self.add_process)
+        self.add_btn.grid(row=1, column=3, padx=(0, 8))
+
+        self.cancel_edit_btn = self._btn(inner, "Cancel Edit", self.cancel_edit, bg="#4a4f5c")
+        # hidden until an edit begins
+
+        self._btn(inner, "Delete Selected", self.delete_process, bg=DANGER).grid(
+            row=1, column=5, padx=(8, 0))
+        self._btn(inner, "Reset All", self.reset_all, bg="#4a4f5c").grid(
+            row=1, column=6, padx=(8, 0))
+
+        self.hint_label = tk.Label(input_frame, text="", font=("Segoe UI", 9),
+                                    bg=PANEL_BG, fg=DANGER)
+        self.hint_label.pack(anchor="w", padx=14, pady=(0, 8))
+
+        # -------- Options Panel --------
+        option_frame = ttk.LabelFrame(self, text="  Scheduling Options  ", style="Panel.TLabelframe")
+        option_frame.pack(fill="x", padx=16, pady=8)
+        opt_inner = tk.Frame(option_frame, bg=PANEL_BG)
+        opt_inner.pack(fill="x", padx=14, pady=12)
+
+        self.algorithm = tk.StringVar(value="FCFS")
+        self.mode = tk.StringVar(value="Non-Preemptive")
+
+        tk.Label(opt_inner, text="Algorithm:", font=LABEL_FONT, bg=PANEL_BG,
+                  fg=TEXT_MUTED).grid(row=0, column=0, sticky="w")
+        ttk.Radiobutton(opt_inner, text="FCFS", variable=self.algorithm, value="FCFS",
+                         command=self._on_algo_change).grid(row=0, column=1, padx=10)
+        ttk.Radiobutton(opt_inner, text="SJF", variable=self.algorithm, value="SJF",
+                         command=self._on_algo_change).grid(row=0, column=2, padx=10)
+        ttk.Radiobutton(opt_inner, text="Round Robin", variable=self.algorithm, value="RR",
+                         command=self._on_algo_change).grid(row=0, column=3, padx=10)
+
+        self.mode_label = tk.Label(opt_inner, text="Mode:", font=LABEL_FONT, bg=PANEL_BG,
+                                    fg=TEXT_MUTED)
+        self.mode_label.grid(row=0, column=4, padx=(30, 0), sticky="w")
+        self.np_radio = ttk.Radiobutton(opt_inner, text="Non-Preemptive", variable=self.mode,
+                                         value="Non-Preemptive")
+        self.p_radio = ttk.Radiobutton(opt_inner, text="Preemptive", variable=self.mode,
+                                        value="Preemptive")
+        self.np_radio.grid(row=0, column=5, padx=10)
+        self.p_radio.grid(row=0, column=6, padx=10)
+
+        self.quantum_label = tk.Label(opt_inner, text="Quantum:", font=LABEL_FONT,
+                                       bg=PANEL_BG, fg=TEXT_MUTED)
+        self.quantum_entry = tk.Entry(opt_inner, width=6, font=ENTRY_FONT, bg=ENTRY_BG,
+                                       fg=TEXT_LIGHT, insertbackground=TEXT_LIGHT, relief="flat")
+        self.quantum_entry.insert(0, "2")
+
+        self._btn(opt_inner, "▶  Run Scheduling", self.run_scheduling).grid(
+            row=0, column=9, padx=(30, 0))
+
+        self._on_algo_change()  # set initial visibility
+
+        # -------- Process Table --------
+        table_frame = ttk.LabelFrame(self, text="  Process Table  ", style="Panel.TLabelframe")
+        table_frame.pack(fill="x", padx=16, pady=8)
+
+        self.table = ttk.Treeview(
+            table_frame, columns=("PID", "AT", "BT", "WT", "TAT"),
+            show="headings", height=7
+        )
+        headings = {"PID": "Process", "AT": "Arrival", "BT": "Burst",
+                    "WT": "Waiting", "TAT": "Turnaround"}
+        for col, text in headings.items():
+            self.table.heading(col, text=text)
+            self.table.column(col, anchor="center", width=140)
+        self.table.pack(fill="x", padx=12, pady=(10, 4), side="left", expand=True)
+        self.table.bind("<Double-1>", self.load_for_edit)
+        self.table.tag_configure("odd", background="#2c3140")
+        self.table.tag_configure("even", background=ENTRY_BG)
+
+        # -------- Averages --------
+        self.avg_label = tk.Label(self, text="Average Waiting Time: —      Average Turnaround Time: —",
+                                   font=("Segoe UI", 12, "bold"), bg=BG, fg=TEXT_LIGHT)
+        self.avg_label.pack(pady=(10, 6))
+
+        # -------- Gantt Chart --------
+        gantt_frame = ttk.LabelFrame(self, text="  Gantt Chart  ", style="Panel.TLabelframe")
+        gantt_frame.pack(fill="both", expand=True, padx=16, pady=(0, 16))
+
+        canvas_container = tk.Frame(gantt_frame, bg=PANEL_BG)
+        canvas_container.pack(fill="both", expand=True, padx=12, pady=12)
+
+        self.canvas = tk.Canvas(canvas_container, height=140, bg="#12141a",
+                                 highlightthickness=0)
+        h_scroll = ttk.Scrollbar(canvas_container, orient="horizontal",
+                                  command=self.canvas.xview, style="Horizontal.TScrollbar")
+        self.canvas.configure(xscrollcommand=h_scroll.set)
+        self.canvas.pack(fill="both", expand=True)
+        h_scroll.pack(fill="x")
+
+    def _field(self, parent, text, col):
+        tk.Label(parent, text=text, font=LABEL_FONT, bg=PANEL_BG,
+                  fg=TEXT_MUTED).grid(row=0, column=col, sticky="w", padx=(0, 16))
+
+    def _on_algo_change(self):
+        algo = self.algorithm.get()
+        if algo == "SJF":
+            self.mode_label.grid()
+            self.np_radio.grid()
+            self.p_radio.grid()
+            self.quantum_label.grid_remove()
+            self.quantum_entry.grid_remove()
+        elif algo == "RR":
+            self.mode_label.grid_remove()
+            self.np_radio.grid_remove()
+            self.p_radio.grid_remove()
+            self.quantum_label.grid(row=0, column=7, padx=(20, 6))
+            self.quantum_entry.grid(row=0, column=8)
+        else:  # FCFS
+            self.mode_label.grid_remove()
+            self.np_radio.grid_remove()
+            self.p_radio.grid_remove()
+            self.quantum_label.grid_remove()
+            self.quantum_entry.grid_remove()
+
+    # ---------------------------------------------------------
+    #  Process management
+    # ---------------------------------------------------------
+    def _color_for(self, pid):
+        if pid not in self.pid_colors:
+            self.pid_colors[pid] = PROCESS_COLORS[len(self.pid_colors) % len(PROCESS_COLORS)]
+        return self.pid_colors[pid]
+
+    def _refresh_table(self):
+        self.table.delete(*self.table.get_children())
+        for i, p in enumerate(self.processes):
+            tag = "odd" if i % 2 else "even"
+            self.table.insert("", "end", values=(p["pid"], p["at"], p["bt"], "-", "-"), tags=(tag,))
+
+    def add_process(self):
+        self.hint_label.config(text="")
+        pid = self.pid_entry.get().strip()
+        at_raw = self.at_entry.get().strip()
+        bt_raw = self.bt_entry.get().strip()
+
+        if not pid:
+            self.hint_label.config(text="Process ID cannot be empty.")
+            return
+        if not at_raw.isdigit() or not bt_raw.isdigit():
+            self.hint_label.config(text="Arrival and Burst time must be non-negative whole numbers.")
+            return
+
+        at, bt = int(at_raw), int(bt_raw)
+        if bt <= 0:
+            self.hint_label.config(text="Burst time must be greater than 0.")
+            return
+
+        if self.editing_pid is not None:
+            # Update existing process instead of duplicating
+            for p in self.processes:
+                if p["pid"] == self.editing_pid:
+                    p["pid"], p["at"], p["bt"], p["remaining"] = pid, at, bt, bt
+                    break
+            if self.editing_pid != pid and self.editing_pid in self.pid_colors:
+                self.pid_colors[pid] = self.pid_colors.pop(self.editing_pid)
+            self.cancel_edit()
+        else:
+            if any(p["pid"] == pid for p in self.processes):
+                self.hint_label.config(text=f"Process '{pid}' already exists — use a unique ID or double-click to edit.")
+                return
+            self.processes.append({"pid": pid, "at": at, "bt": bt, "remaining": bt})
+            self._color_for(pid)
+
+        self._refresh_table()
+        self.pid_entry.delete(0, tk.END)
+        self.at_entry.delete(0, tk.END)
+        self.bt_entry.delete(0, tk.END)
+        self.pid_entry.focus_set()
+
+    def load_for_edit(self, event):
+        selected = self.table.selection()
+        if not selected:
+            return
+        values = self.table.item(selected[0])["values"]
+        pid, at, bt = values[0], values[1], values[2]
+
+        self.pid_entry.delete(0, tk.END)
+        self.at_entry.delete(0, tk.END)
+        self.bt_entry.delete(0, tk.END)
+        self.pid_entry.insert(0, pid)
+        self.at_entry.insert(0, at)
+        self.bt_entry.insert(0, bt)
+
+        self.editing_pid = str(pid)
+        self.add_btn.config(text="Update Process")
+        self.cancel_edit_btn.grid(row=1, column=4, padx=(0, 8))
+
+    def cancel_edit(self):
+        self.editing_pid = None
+        self.add_btn.config(text="Add Process")
+        self.cancel_edit_btn.grid_forget()
+        self.pid_entry.delete(0, tk.END)
+        self.at_entry.delete(0, tk.END)
+        self.bt_entry.delete(0, tk.END)
+
+    def delete_process(self):
+        selected = self.table.selection()
+        if not selected:
+            messagebox.showwarning("Nothing selected", "Select a process in the table first.")
+            return
+        pid = str(self.table.item(selected[0])["values"][0])
+        self.processes = [p for p in self.processes if p["pid"] != pid]
+        self.pid_colors.pop(pid, None)
+        if self.editing_pid == pid:
+            self.cancel_edit()
+        self._refresh_table()
+        self.clear_gantt()
+
+    def reset_all(self):
+        if not self.processes and not self.schedule:
+            return
+        if not messagebox.askyesno("Reset All", "This clears every process and result. Continue?"):
+            return
+        self.processes.clear()
+        self.schedule.clear()
+        self.pid_colors.clear()
+        self.cancel_edit()
+        self._refresh_table()
+        self.clear_gantt()
+        self.avg_label.config(text="Average Waiting Time: —      Average Turnaround Time: —")
+
+    # ---------------------------------------------------------
+    #  Scheduling
+    # ---------------------------------------------------------
+    def run_scheduling(self):
+        if not self.processes:
+            messagebox.showwarning("No processes", "Add at least one process first.")
+            return
+
+        for p in self.processes:
+            p["remaining"] = p["bt"]
+        self.schedule.clear()
+        self.canvas.delete("all")
+
+        algo = self.algorithm.get()
+        try:
+            if algo == "FCFS":
+                self.fcfs()
+            elif algo == "SJF":
+                self.sjf()
+            else:
+                quantum_raw = self.quantum_entry.get().strip()
+                if not quantum_raw.isdigit() or int(quantum_raw) <= 0:
+                    messagebox.showerror("Invalid quantum", "Time quantum must be a positive whole number.")
+                    return
+                self.round_robin(int(quantum_raw))
+        except Exception as exc:
+            messagebox.showerror("Scheduling error", f"Something went wrong: {exc}")
+            return
+
+        self.calculate_times()
+        self.draw_gantt()
+
+    def fcfs(self):
+        time = 0
+        for p in sorted(self.processes, key=lambda x: (x["at"], x["pid"])):
+            if time < p["at"]:
+                self.schedule.append(("IDLE", time, p["at"]))
+                time = p["at"]
+            start = time
+            end = start + p["bt"]
+            time = end
+            self.schedule.append((p["pid"], start, end))
+
+    def sjf(self):
+        time = 0
+        completed = 0
+        n = len(self.processes)
+        preemptive = self.mode.get() == "Preemptive"
+
+        while completed < n:
+            ready = [p for p in self.processes if p["at"] <= time and p["remaining"] > 0]
+            if not ready:
+                next_arrival = min(p["at"] for p in self.processes if p["remaining"] > 0)
+                self.schedule.append(("IDLE", time, next_arrival))
+                time = next_arrival
+                continue
+
+            p = min(ready, key=lambda x: (x["remaining"], x["at"]))
+            if not preemptive:
+                start = time
+                time += p["remaining"]
+                p["remaining"] = 0
+                completed += 1
+                self.schedule.append((p["pid"], start, time))
+            else:
+                start = time
+                time += 1
+                p["remaining"] -= 1
+                self.schedule.append((p["pid"], start, time))
+                if p["remaining"] == 0:
+                    completed += 1
+
+    def round_robin(self, quantum):
+        time = 0
+        remaining = {p["pid"]: p["bt"] for p in self.processes}
+        arrival_order = sorted(self.processes, key=lambda x: (x["at"], x["pid"]))
+        n = len(arrival_order)
+        idx = 0
+        queue = []
+        completed = 0
+
+        while completed < n:
+            while idx < n and arrival_order[idx]["at"] <= time:
+                queue.append(arrival_order[idx])
+                idx += 1
+
+            if not queue:
+                next_arrival = arrival_order[idx]["at"]
+                self.schedule.append(("IDLE", time, next_arrival))
+                time = next_arrival
+                continue
+
+            p = queue.pop(0)
+            run_time = min(quantum, remaining[p["pid"]])
+            start = time
+            time += run_time
+            remaining[p["pid"]] -= run_time
+            self.schedule.append((p["pid"], start, time))
+
+            while idx < n and arrival_order[idx]["at"] <= time:
+                queue.append(arrival_order[idx])
+                idx += 1
+
+            if remaining[p["pid"]] > 0:
+                queue.append(p)
+            else:
+                completed += 1
+
+    # ---------------------------------------------------------
+    #  Results
+    # ---------------------------------------------------------
+    def calculate_times(self):
+        total_wt = 0
+        total_tat = 0
+        n = len(self.processes)
+
+        for i, p in enumerate(self.processes):
+            completion = max(end for pid, _, end in self.schedule if pid == p["pid"])
+            tat = completion - p["at"]
+            wt = tat - p["bt"]
+            total_wt += wt
+            total_tat += tat
+
+            tag = "odd" if i % 2 else "even"
+            item_id = self.table.get_children()[i] if i < len(self.table.get_children()) else None
+            if item_id:
+                self.table.item(item_id, values=(p["pid"], p["at"], p["bt"], wt, tat), tags=(tag,))
+
+        self.avg_label.config(
+            text=f"Average Waiting Time: {total_wt/n:.2f}      Average Turnaround Time: {total_tat/n:.2f}"
+        )
+
+    def _merge_schedule(self):
+        """Combine consecutive entries of the same pid into one block for a cleaner chart."""
+        merged = []
+        for pid, start, end in self.schedule:
+            if merged and merged[-1][0] == pid and merged[-1][2] == start:
+                merged[-1] = (pid, merged[-1][1], end)
+            else:
+                merged.append((pid, start, end))
+        return merged
+
+    def draw_gantt(self):
+        self.canvas.delete("all")
+        if not self.schedule:
+            return
+
+        blocks = self._merge_schedule()
+        unit_width = 36
+        x = 16
+        top, bottom = 35, 95
+
+        for pid, start, end in blocks:
+            width = max((end - start) * unit_width, 30)
+            color = IDLE_COLOR if pid == "IDLE" else self._color_for(pid)
+            text_color = TEXT_MUTED if pid == "IDLE" else "white"
+
+            self.canvas.create_rectangle(x, top, x + width, bottom, fill=color,
+                                          outline="#12141a", width=2)
+            self.canvas.create_text(x + width / 2, (top + bottom) / 2, text=pid,
+                                     fill=text_color, font=("Segoe UI", 10, "bold"))
+            self.canvas.create_text(x, bottom + 14, text=str(start), fill=TEXT_MUTED,
+                                     font=("Segoe UI", 8))
+            x += width
+
+        self.canvas.create_text(x, bottom + 14, text=str(blocks[-1][2]), fill=TEXT_MUTED,
+                                 font=("Segoe UI", 8))
+        self.canvas.configure(scrollregion=(0, 0, x + 20, 140))
+
+    def clear_gantt(self):
+        self.canvas.delete("all")
+        self.schedule.clear()
+
+
+if __name__ == "__main__":
+    app = SchedulerOS()
+    app.mainloop()
